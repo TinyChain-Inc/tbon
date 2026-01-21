@@ -26,7 +26,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use destream::{FromStream, IntoStream};
-    use futures::{future, TryStreamExt};
+    use futures::{future, stream, StreamExt, TryStreamExt};
 
     use rand::Rng;
 
@@ -42,6 +42,86 @@ mod tests {
         let encoded = encode(value.clone()).unwrap();
         let decoded: T = try_decode((), encoded).await.unwrap();
         assert_eq!(decoded, value);
+    }
+
+    async fn encode_to_vec<'en, T>(value: T) -> Vec<u8>
+    where
+        T: IntoStream<'en> + Clone + 'en,
+    {
+        encode(value)
+            .unwrap()
+            .try_fold(Vec::new(), |mut buffer, chunk| {
+                buffer.extend_from_slice(&chunk);
+                future::ready(Ok(buffer))
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn decode_from_chunks<T: FromStream<Context = ()>>(
+        bytes: &[u8],
+        chunk_size: usize,
+    ) -> Result<T, super::de::Error> {
+        let source = stream::iter(bytes.iter().copied())
+            .chunks(chunk_size.max(1))
+            .map(Bytes::from)
+            .map(Result::<Bytes, super::en::Error>::Ok);
+
+        try_decode((), source).await
+    }
+
+    #[tokio::test]
+    async fn test_decode_chunk_boundaries() {
+        let value = (true, -1i16, 3.14f64, "hello".to_string(), vec![1u8, 2, 3]);
+
+        let bytes = encode_to_vec(value.clone()).await;
+        for chunk_size in 1..=bytes.len().min(16).max(1) {
+            let decoded: (bool, i16, f64, String, Vec<u8>) =
+                decode_from_chunks(&bytes, chunk_size).await.unwrap();
+            assert_eq!(decoded, value);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_truncated_streams_fail() {
+        let value = (HashMap::<String, u64>::from_iter([
+            ("a".into(), 1),
+            ("b".into(), 2),
+        ]),);
+        let bytes = encode_to_vec(value.clone()).await;
+
+        // Determine the minimum prefix length required to decode successfully (TBON decoders are
+        // allowed to stop after reading a single value).
+        let mut min_success = None;
+        for i in 0..=bytes.len() {
+            let result: Result<(HashMap<String, u64>,), _> =
+                decode_from_chunks(&bytes[..i], 1).await;
+            if result.as_ref().is_ok_and(|decoded| decoded == &value) {
+                min_success = Some(i);
+                break;
+            }
+        }
+
+        let min_success = min_success.expect("expected at least one successful decode");
+        for i in 0..min_success {
+            for chunk_size in [1usize, 2, 3, 7] {
+                let result: Result<(HashMap<String, u64>,), _> =
+                    decode_from_chunks(&bytes[..i], chunk_size).await;
+                assert!(result.is_err(), "expected truncation to fail at {i}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_stream_fails() {
+        let value = ("hello".to_string(), vec![1u8, 2, 3]);
+        let mut bytes = encode_to_vec(value).await;
+        if let Some(first) = bytes.first_mut() {
+            *first = 0xFF;
+        }
+
+        let result: Result<(String, Vec<u8>), _> = decode_from_chunks(&bytes, 3).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

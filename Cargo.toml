@@ -1,6 +1,6 @@
 [package]
 name = "tbon"
-version = "0.7.0"
+version = "0.8.0"
 authors = ["code@tinychain.net"]
 edition = "2021"
 description = "TinyChain Binary Object Notation is a compact and versatile stream-friendly binary serialization format"
