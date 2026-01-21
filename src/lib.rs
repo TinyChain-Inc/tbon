@@ -21,7 +21,9 @@ pub mod en;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{
+        BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque,
+    };
     use std::fmt;
     use std::iter::FromIterator;
 
@@ -123,6 +125,51 @@ mod tests {
 
         let result: Result<(String, Vec<u8>), _> = decode_from_chunks(&bytes, 3).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_default_impl_roundtrips() {
+        run_test(()).await;
+
+        run_test(Some("hello".to_string())).await;
+        run_test::<Option<String>>(None).await;
+
+        run_test(VecDeque::from([1u16, 2, 3, 4])).await;
+        run_test(LinkedList::from([1i8, 2, 3, 4])).await;
+
+        run_test(BTreeSet::from([1u8, 2, 3])).await;
+        run_test(HashSet::from(["a".to_string(), "b".to_string()])).await;
+
+        run_test(BTreeMap::from_iter([
+            (1u64, "one".to_string()),
+            (2u64, "two".to_string()),
+        ]))
+        .await;
+        run_test(HashMap::<i32, String>::from_iter([
+            (-1i32, "one".to_string()),
+            (2i32, "two".to_string()),
+        ]))
+        .await;
+
+        let array = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let array_ref: &[u8; 8] = &array;
+        let encoded = encode(&array_ref).unwrap();
+        let decoded: [u8; 8] = try_decode((), encoded).await.unwrap();
+        assert_eq!(decoded, array);
+        run_test((1u8, 2u16, 3u32, 4u64)).await;
+
+        // BinaryHeap doesn't implement PartialEq; compare its sorted contents.
+        let heap: BinaryHeap<i32> = BinaryHeap::from([3, 1, 2, 5, 4]);
+        let encoded = encode(&heap).unwrap();
+        let decoded: BinaryHeap<i32> = try_decode((), encoded).await.unwrap();
+        assert_eq!(heap.clone().into_sorted_vec(), decoded.into_sorted_vec());
+
+        // IgnoredAny must be able to consume any TBON value.
+        let map: HashMap<String, Vec<u8>> =
+            HashMap::from_iter([("a".to_string(), vec![1u8, 2, 3])]);
+        let tuple = (map,);
+        let encoded = encode(&tuple).unwrap();
+        let _: destream::IgnoredAny = try_decode((), encoded).await.unwrap();
     }
 
     #[tokio::test]
