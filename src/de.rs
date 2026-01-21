@@ -1,9 +1,9 @@
 //! Decode a Rust data structure from a TBON-encoded stream.
 
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 
-use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use destream::{de, FromStream, Visitor};
 use futures::stream::{Fuse, FusedStream, Stream, StreamExt, TryStreamExt};
@@ -19,10 +19,9 @@ const CHUNK_SIZE: usize = 4096;
 const SNIPPET_LEN: usize = 10;
 
 /// Methods common to any decodable [`Stream`]
-#[async_trait]
 pub trait Read: Send + Unpin {
     /// Read the next chunk of [`Bytes`] in the [`Stream`], if any.
-    async fn next(&mut self) -> Option<Result<Bytes, Error>>;
+    fn next(&mut self) -> impl Future<Output = Option<Result<Bytes, Error>>> + Send;
 
     /// Return `true` if there is no more content to be read from the [`Stream`].
     fn is_terminated(&self) -> bool;
@@ -33,10 +32,9 @@ pub struct SourceStream<S> {
     source: Fuse<S>,
 }
 
-#[async_trait]
 impl<S: Stream<Item = Result<Bytes, Error>> + Send + Unpin> Read for SourceStream<S> {
-    async fn next(&mut self) -> Option<Result<Bytes, Error>> {
-        self.source.next().await
+    fn next(&mut self) -> impl Future<Output = Option<Result<Bytes, Error>>> + Send {
+        async { self.source.next().await }
     }
 
     fn is_terminated(&self) -> bool {
@@ -59,21 +57,22 @@ pub struct SourceReader<R: AsyncRead> {
     terminated: bool,
 }
 
-#[async_trait]
 #[cfg(feature = "tokio-io")]
 impl<R: AsyncRead + Send + Unpin> Read for SourceReader<R> {
-    async fn next(&mut self) -> Option<Result<Bytes, Error>> {
-        let mut chunk = Vec::new();
-        match self.reader.read_buf(&mut chunk).await {
-            Ok(0) => {
-                self.terminated = true;
-                Some(Ok(Bytes::from(chunk)))
+    fn next(&mut self) -> impl Future<Output = Option<Result<Bytes, Error>>> + Send {
+        async {
+            let mut chunk = Vec::new();
+            match self.reader.read_buf(&mut chunk).await {
+                Ok(0) => {
+                    self.terminated = true;
+                    Some(Ok(Bytes::from(chunk)))
+                }
+                Ok(size) => {
+                    debug_assert_eq!(chunk.len(), size);
+                    Some(Ok(Bytes::from(chunk)))
+                }
+                Err(cause) => Some(Err(de::Error::custom(format!("io error: {}", cause)))),
             }
-            Ok(size) => {
-                debug_assert_eq!(chunk.len(), size);
-                Some(Ok(Bytes::from(chunk)))
-            }
-            Err(cause) => Some(Err(de::Error::custom(format!("io error: {}", cause)))),
         }
     }
 
@@ -152,7 +151,6 @@ impl<'a, S: Read + 'a, T: Element> ArrayAccess<'a, S, T> {
     }
 }
 
-#[async_trait]
 impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a, S, T> {
     type Error = Error;
 
@@ -254,7 +252,6 @@ impl<'a, S: Read + 'a> MapAccess<'a, S> {
     }
 }
 
-#[async_trait]
 impl<'a, S: Read + 'a> de::MapAccess for MapAccess<'a, S> {
     type Error = Error;
 
@@ -312,7 +309,6 @@ impl<'a, S: Read + 'a> SeqAccess<'a, S> {
     }
 }
 
-#[async_trait]
 impl<'a, S: Read + 'a> de::SeqAccess for SeqAccess<'a, S> {
     type Error = Error;
 
@@ -656,7 +652,6 @@ impl<R: Read> Decoder<R> {
     }
 }
 
-#[async_trait]
 impl<R: Read> de::Decoder for Decoder<R> {
     type Error = Error;
 
@@ -697,23 +692,20 @@ impl<R: Read> de::Decoder for Decoder<R> {
             LIST_BEGIN => self.decode_seq(visitor).await,
             MAP_BEGIN => self.decode_map(visitor).await,
             STRING_DELIMIT => self.decode_string(visitor).await,
-            [dtype] => {
-                match type_from(*dtype)? {
-                    Type::None => self.decode_unit(visitor),
-                    Type::Bool => self.decode_bool(visitor),
-                    Type::F32 => self.decode_f32(visitor),
-                    Type::F64 => self.decode_f64(visitor),
-                    Type::I8 => self.decode_i8(visitor),
-                    Type::I16 => self.decode_i16(visitor),
-                    Type::I32 => self.decode_i32(visitor),
-                    Type::I64 => self.decode_i64(visitor),
-                    Type::U8 => self.decode_u8(visitor),
-                    Type::U16 => self.decode_u16(visitor),
-                    Type::U32 => self.decode_u32(visitor),
-                    Type::U64 => self.decode_u64(visitor),
-                }
-                .await
-            }
+            [dtype] => match type_from(*dtype)? {
+                Type::None => self.decode_unit(visitor).await,
+                Type::Bool => self.decode_bool(visitor).await,
+                Type::F32 => self.decode_f32(visitor).await,
+                Type::F64 => self.decode_f64(visitor).await,
+                Type::I8 => self.decode_i8(visitor).await,
+                Type::I16 => self.decode_i16(visitor).await,
+                Type::I32 => self.decode_i32(visitor).await,
+                Type::I64 => self.decode_i64(visitor).await,
+                Type::U8 => self.decode_u8(visitor).await,
+                Type::U16 => self.decode_u16(visitor).await,
+                Type::U32 => self.decode_u32(visitor).await,
+                Type::U64 => self.decode_u64(visitor).await,
+            },
         }
     }
 

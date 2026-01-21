@@ -9,6 +9,8 @@
 //! assert_eq!(expected, actual);
 //! ```
 
+#![allow(async_fn_in_trait)]
+
 use element::Element;
 
 mod constants;
@@ -23,7 +25,6 @@ mod tests {
     use std::fmt;
     use std::iter::FromIterator;
 
-    use async_trait::async_trait;
     use bytes::Bytes;
     use destream::{FromStream, IntoStream};
     use futures::{future, stream, StreamExt, TryStreamExt};
@@ -237,7 +238,6 @@ mod tests {
 
         struct TestVisitor;
 
-        #[async_trait]
         impl destream::de::Visitor for TestVisitor {
             type Value = TestArray;
 
@@ -264,7 +264,6 @@ mod tests {
             }
         }
 
-        #[async_trait]
         impl FromStream for TestArray {
             type Context = ();
 
