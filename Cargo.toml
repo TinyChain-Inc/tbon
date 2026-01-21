@@ -18,7 +18,7 @@ all = ["tokio-io"]
 
 [dependencies]
 bytes = "1.10"
-destream = "0.9"
+destream = { path = "../destream", version = "0.9.0" }
 futures = "0.3"
 num-traits = "0.2"
 num-derive = "0.4"

@@ -26,6 +26,9 @@ mod tests {
     };
     use std::fmt;
     use std::iter::FromIterator;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::num::{NonZeroI128, NonZeroU128};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use destream::{FromStream, IntoStream};
@@ -71,6 +74,16 @@ mod tests {
             .map(Result::<Bytes, super::en::Error>::Ok);
 
         try_decode((), source).await
+    }
+
+    async fn assert_decode_fails<'en, T, V>(value: V)
+    where
+        T: FromStream<Context = ()>,
+        V: IntoStream<'en> + Clone + 'en,
+    {
+        let encoded = encode(value).unwrap();
+        let result: Result<T, _> = try_decode((), encoded).await;
+        assert!(result.is_err(), "expected decode to fail, but succeeded");
     }
 
     #[tokio::test]
@@ -170,6 +183,56 @@ mod tests {
         let tuple = (map,);
         let encoded = encode(&tuple).unwrap();
         let _: destream::IgnoredAny = try_decode((), encoded).await.unwrap();
+
+        run_test(i128::MAX).await;
+        run_test(u128::MAX).await;
+        run_test(NonZeroI128::new(-5_i128).unwrap()).await;
+        run_test(NonZeroU128::new(5_u128).unwrap()).await;
+
+        run_test(Duration::new(5, 7)).await;
+
+        run_test(Ipv4Addr::new(127, 0, 0, 1)).await;
+        run_test(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)).await;
+        run_test(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))).await;
+        run_test(SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 80))).await;
+    }
+
+    #[tokio::test]
+    async fn test_extended_default_impl_numeric_tokens() {
+        let encoded = encode(123_i64).unwrap();
+        let decoded: i128 = try_decode((), encoded).await.unwrap();
+        assert_eq!(decoded, 123_i128);
+
+        let encoded = encode(123_u64).unwrap();
+        let decoded: u128 = try_decode((), encoded).await.unwrap();
+        assert_eq!(decoded, 123_u128);
+
+        let encoded = encode(i64::MAX).unwrap();
+        let decoded: i128 = try_decode((), encoded).await.unwrap();
+        assert_eq!(decoded, i64::MAX as i128);
+
+        let encoded = encode(u64::MAX).unwrap();
+        let decoded: u128 = try_decode((), encoded).await.unwrap();
+        assert_eq!(decoded, u64::MAX as u128);
+    }
+
+    #[tokio::test]
+    async fn test_extended_default_impl_decode_errors() {
+        assert_decode_fails::<u128, _>(-1_i64).await;
+        assert_decode_fails::<NonZeroU128, _>(0_u64).await;
+        assert_decode_fails::<NonZeroI128, _>(0_i64).await;
+
+        assert_decode_fails::<u128, _>(format!("{}0", u128::MAX)).await;
+        assert_decode_fails::<i128, _>(format!("{}0", i128::MAX)).await;
+
+        assert_decode_fails::<Duration, _>((5_u64,)).await;
+        assert_decode_fails::<Duration, _>((5_u64, "7".to_string())).await;
+        assert_decode_fails::<Duration, _>((5_u64, 1_000_000_000_u32)).await;
+
+        assert_decode_fails::<Ipv4Addr, _>("999.0.0.1").await;
+        assert_decode_fails::<Ipv6Addr, _>("not an ip").await;
+        assert_decode_fails::<IpAddr, _>("not an ip").await;
+        assert_decode_fails::<SocketAddr, _>("127.0.0.1").await;
     }
 
     #[tokio::test]
