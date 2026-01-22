@@ -16,3 +16,9 @@ let stream = tbon::en::encode(&expected).unwrap();
 let actual = tbon::de::try_decode((), stream).await.unwrap();
 assert_eq!(expected, actual);
 ```
+
+## Chunk-size micro-benchmark
+
+To inspect decode performance sensitivity to input chunk size:
+
+`cargo test --test bench_chunk_size -- --ignored --nocapture`

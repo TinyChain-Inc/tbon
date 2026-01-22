@@ -166,12 +166,12 @@ impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a,
         let mut escaped = false;
 
         while i < limit {
-            while i >= self.decoder.buffer.len() && !self.decoder.source.is_terminated() {
+            while i >= self.decoder.remaining() && !self.decoder.source.is_terminated() {
                 self.decoder.buffer().await?;
             }
 
-            if i < self.decoder.buffer.len()
-                && &self.decoder.buffer[i..i + 1] == ARRAY_DELIMIT
+            if i < self.decoder.remaining()
+                && &self.decoder.available()[i..i + 1] == ARRAY_DELIMIT
                 && !escaped
             {
                 break;
@@ -179,7 +179,7 @@ impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a,
 
             if escaped {
                 escaped = false;
-            } else if self.decoder.buffer[i] == ESCAPE[0] {
+            } else if self.decoder.available()[i] == ESCAPE[0] {
                 escaped = true;
                 limit += 1;
             }
@@ -189,18 +189,19 @@ impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a,
 
         let mut escape = false;
         let mut escaped = BytesMut::with_capacity(i);
-        for byte in self.decoder.buffer.drain(0..i) {
-            let as_slice = std::slice::from_ref(&byte);
+        for byte in &self.decoder.available()[..i] {
+            let as_slice = std::slice::from_ref(byte);
 
             if escape {
-                escaped.put_u8(byte);
+                escaped.put_u8(*byte);
                 escape = false;
             } else if as_slice == ESCAPE {
                 escape = true;
             } else {
-                escaped.put_u8(byte);
+                escaped.put_u8(*byte);
             }
         }
+        self.decoder.consume(i);
 
         let mut elements = 0;
 
@@ -209,7 +210,7 @@ impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a,
             elements += 1;
         }
 
-        while self.decoder.buffer.is_empty() {
+        while self.decoder.remaining() == 0 {
             if self.decoder.source.is_terminated() {
                 return Err(Error::unexpected_end());
             } else {
@@ -217,13 +218,10 @@ impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a,
             }
         }
 
-        if &self.decoder.buffer[0..1] == ARRAY_DELIMIT {
+        if self.decoder.available().starts_with(ARRAY_DELIMIT) {
             self.done = true;
-            // process the end delimiter
-            self.decoder.buffer.remove(0);
+            self.decoder.consume(1);
         }
-
-        self.decoder.buffer.shrink_to_fit();
 
         Ok(elements)
     }
@@ -338,15 +336,45 @@ impl<'a, S: Read + 'a> de::SeqAccess for SeqAccess<'a, S> {
 pub struct Decoder<R> {
     source: R,
     buffer: Vec<u8>,
+    offset: usize,
 }
 
 impl<R> Decoder<R> {
+    fn remaining(&self) -> usize {
+        self.buffer.len().saturating_sub(self.offset)
+    }
+
+    fn available(&self) -> &[u8] {
+        &self.buffer[self.offset..]
+    }
+
+    fn maybe_compact(&mut self) {
+        if self.offset == 0 {
+            return;
+        }
+
+        if self.offset == self.buffer.len() {
+            self.buffer.clear();
+            self.offset = 0;
+        } else if self.offset > 8192 && self.offset > self.buffer.len() / 2 {
+            self.buffer.drain(..self.offset);
+            self.offset = 0;
+        }
+    }
+
+    fn consume(&mut self, n: usize) {
+        debug_assert!(self.remaining() >= n);
+        self.offset += n;
+        self.maybe_compact();
+    }
+
     fn contents(&self, max_len: usize) -> String {
-        let len = Ord::min(self.buffer.len(), max_len);
+        let buf = self.available();
+        let len = Ord::min(buf.len(), max_len);
         let mut chunks: Vec<String> = Vec::with_capacity(len);
         let mut chunk = Vec::with_capacity(len);
         let mut is_ascii = false;
-        for c in &self.buffer[..len] {
+        for c in &buf[..len] {
             if is_ascii != c.is_ascii() {
                 chunks.push(chunk.iter().collect());
                 chunk.clear();
@@ -377,6 +405,7 @@ where
         Decoder {
             source: SourceReader::from(reader),
             buffer: Vec::new(),
+            offset: 0,
         }
     }
 }
@@ -390,6 +419,7 @@ where
         Decoder {
             source: SourceStream::from(stream),
             buffer: Vec::new(),
+            offset: 0,
         }
     }
 }
@@ -397,6 +427,7 @@ where
 impl<R: Read> Decoder<R> {
     async fn buffer(&mut self) -> Result<(), Error> {
         if let Some(data) = self.source.next().await {
+            self.maybe_compact();
             self.buffer.extend(data?);
         }
 
@@ -413,19 +444,20 @@ impl<R: Read> Decoder<R> {
         let mut i = 0;
         let mut escaped = false;
         loop {
-            while i >= self.buffer.len() && !self.source.is_terminated() {
+            while i >= self.remaining() && !self.source.is_terminated() {
                 self.buffer().await?;
             }
 
-            if i < self.buffer.len() && &self.buffer[i..i + 1] == end && !escaped {
-                break;
-            } else if self.source.is_terminated() {
-                return Err(Error::unexpected_end());
+            match self.available().get(i) {
+                Some(b) if std::slice::from_ref(b) == end && !escaped => break,
+                Some(_) => {}
+                None if self.source.is_terminated() => return Err(Error::unexpected_end()),
+                None => continue,
             }
 
             if escaped {
                 escaped = false;
-            } else if self.buffer[i] == ESCAPE[0] {
+            } else if self.available()[i] == ESCAPE[0] {
                 escaped = true;
             }
 
@@ -434,21 +466,20 @@ impl<R: Read> Decoder<R> {
 
         let mut escape = false;
         let mut s = BytesMut::with_capacity(i);
-        for byte in self.buffer.drain(0..i) {
-            let as_slice = std::slice::from_ref(&byte);
+        for byte in &self.available()[..i] {
+            let as_slice = std::slice::from_ref(byte);
 
             if escape {
-                s.put_u8(byte);
+                s.put_u8(*byte);
                 escape = false;
             } else if as_slice == ESCAPE {
                 escape = true;
             } else {
-                s.put_u8(byte);
+                s.put_u8(*byte);
             }
         }
 
-        self.buffer.remove(0); // process the end delimiter
-        self.buffer.shrink_to_fit();
+        self.consume(i + 1); // include end delimiter
         Ok(s.into())
     }
 
@@ -462,47 +493,49 @@ impl<R: Read> Decoder<R> {
         let mut i = 0;
         let mut escaped = false;
         loop {
-            while i >= self.buffer.len() && !self.source.is_terminated() {
+            while i >= self.remaining() && !self.source.is_terminated() {
                 self.buffer().await?;
             }
 
-            if i < self.buffer.len() && &self.buffer[i..i + 1] == end && !escaped {
-                self.buffer.drain(..i);
-                break;
-            } else if self.source.is_terminated() {
-                return Err(Error::unexpected_end());
+            match self.available().get(i) {
+                Some(b) if std::slice::from_ref(b) == end && !escaped => {
+                    self.consume(i);
+                    break;
+                }
+                Some(_) => {}
+                None if self.source.is_terminated() => return Err(Error::unexpected_end()),
+                None => continue,
             }
 
             if escaped {
                 escaped = false;
-            } else if self.buffer[i] == ESCAPE[0] {
+            } else if self.available()[i] == ESCAPE[0] {
                 escaped = true;
             }
 
             if i > CHUNK_SIZE {
-                self.buffer.drain(..i);
+                self.consume(i);
                 i = 0;
             } else {
                 i += 1;
             }
         }
 
-        self.buffer.remove(0); // process the end delimiter
-        self.buffer.shrink_to_fit();
+        self.consume(1); // process the end delimiter
         Ok(())
     }
 
     async fn expect_delimiter(&mut self, delimiter: &[u8]) -> Result<(), Error> {
-        while self.buffer.is_empty() && !self.source.is_terminated() {
+        while self.remaining() == 0 && !self.source.is_terminated() {
             self.buffer().await?;
         }
 
-        if self.buffer.is_empty() {
+        if self.remaining() == 0 {
             return Err(Error::unexpected_end());
         }
 
-        if &self.buffer[..1] == delimiter {
-            self.buffer.remove(0);
+        if self.available().starts_with(delimiter) {
+            self.consume(delimiter.len());
             Ok(())
         } else {
             fn char_to_string(c: u8) -> String {
@@ -513,7 +546,7 @@ impl<R: Read> Decoder<R> {
                 }
             }
 
-            let actual = char_to_string(self.buffer[0]);
+            let actual = char_to_string(self.available()[0]);
             let expected = char_to_string(delimiter[0]);
 
             let snippet = self.contents(SNIPPET_LEN);
@@ -525,24 +558,24 @@ impl<R: Read> Decoder<R> {
     }
 
     async fn ignore_value(&mut self) -> Result<(), Error> {
-        while self.buffer.is_empty() && !self.source.is_terminated() {
+        while self.remaining() == 0 && !self.source.is_terminated() {
             self.buffer().await?;
         }
 
-        if self.buffer.is_empty() {
+        if self.remaining() == 0 {
             Ok(())
         } else {
-            match &[self.buffer[0]] {
-                LIST_BEGIN => {
+            match self.available()[0] {
+                b if b == LIST_BEGIN[0] => {
                     self.ignore_string(LIST_BEGIN, LIST_END).await?;
                 }
-                MAP_BEGIN => {
+                b if b == MAP_BEGIN[0] => {
                     self.ignore_string(MAP_BEGIN, MAP_END).await?;
                 }
-                STRING_DELIMIT => {
+                b if b == STRING_DELIMIT[0] => {
                     self.ignore_string(STRING_DELIMIT, STRING_DELIMIT).await?;
                 }
-                &[dtype] => match Type::from_u8(dtype)
+                dtype => match Type::from_u8(dtype)
                     .ok_or_else(|| de::Error::invalid_type("unknown", "any supported type"))?
                 {
                     Type::None => {
@@ -589,14 +622,14 @@ impl<R: Read> Decoder<R> {
     }
 
     async fn maybe_delimiter(&mut self, delimiter: &'static [u8]) -> Result<bool, Error> {
-        while self.buffer.is_empty() && !self.source.is_terminated() {
+        while self.remaining() == 0 && !self.source.is_terminated() {
             self.buffer().await?;
         }
 
-        if self.buffer.is_empty() {
+        if self.remaining() == 0 {
             Ok(false)
-        } else if &self.buffer[..1] == delimiter {
-            self.buffer.remove(0);
+        } else if self.available().starts_with(delimiter) {
+            self.consume(delimiter.len());
             Ok(true)
         } else {
             Ok(false)
@@ -604,18 +637,19 @@ impl<R: Read> Decoder<R> {
     }
 
     async fn parse_element<N: Element>(&mut self) -> Result<N, Error> {
-        while self.buffer.len() <= N::SIZE && !self.source.is_terminated() {
+        while self.remaining() <= N::SIZE && !self.source.is_terminated() {
             self.buffer().await?;
         }
 
-        if self.buffer.len() <= N::SIZE {
+        if self.remaining() <= N::SIZE {
             return Err(de::Error::invalid_length(
-                self.buffer.len(),
+                self.remaining(),
                 std::any::type_name::<N>(),
             ));
         }
 
-        let dtype = self.buffer.remove(0);
+        let dtype = self.available()[0];
+        self.consume(1);
         if Some(dtype) == N::dtype().to_u8() {
             // no-op
         } else if let Some(dtype) = Type::from_u8(dtype) {
@@ -624,7 +658,8 @@ impl<R: Read> Decoder<R> {
             return Err(de::Error::invalid_value(dtype, "a TBON type bit"));
         }
 
-        let bytes: Vec<u8> = self.buffer.drain(0..N::SIZE).collect();
+        let bytes = self.available()[..N::SIZE].to_vec();
+        self.consume(N::SIZE);
         N::parse(&bytes)
     }
 
@@ -634,15 +669,17 @@ impl<R: Read> Decoder<R> {
     }
 
     async fn parse_unit(&mut self) -> Result<(), Error> {
-        while self.buffer.is_empty() && !self.source.is_terminated() {
+        while self.remaining() == 0 && !self.source.is_terminated() {
             self.buffer().await?;
         }
 
-        if self.buffer.is_empty() {
+        if self.remaining() == 0 {
             return Err(Error::unexpected_end());
         }
 
-        match self.buffer.remove(0) {
+        let dtype = self.available()[0];
+        self.consume(1);
+        match dtype {
             byte if Some(byte) == Type::None.to_u8() => Ok(()),
             other => match Type::from_u8(other) {
                 Some(dtype) => Err(de::Error::invalid_type(dtype, Type::None)),
@@ -656,11 +693,11 @@ impl<R: Read> de::Decoder for Decoder<R> {
     type Error = Error;
 
     async fn decode_any<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
-        while self.buffer.is_empty() && !self.source.is_terminated() {
+        while self.remaining() == 0 && !self.source.is_terminated() {
             self.buffer().await?;
         }
 
-        if self.buffer.is_empty() {
+        if self.remaining() == 0 {
             return Err(Error::unexpected_end());
         }
 
@@ -669,13 +706,13 @@ impl<R: Read> de::Decoder for Decoder<R> {
                 .ok_or_else(|| de::Error::custom(format!("invalid type bit: {}", bit)))
         }
 
-        match &[self.buffer[0]] {
-            ARRAY_DELIMIT => {
-                while self.buffer.len() < 2 && !self.source.is_terminated() {
+        match self.available()[0] {
+            b if b == ARRAY_DELIMIT[0] => {
+                while self.remaining() < 2 && !self.source.is_terminated() {
                     self.buffer().await?;
                 }
 
-                match type_from(self.buffer[1])? {
+                match type_from(self.available()[1])? {
                     Type::Bool => self.decode_array_bool(visitor).await,
                     Type::F32 => self.decode_array_f32(visitor).await,
                     Type::F64 => self.decode_array_f64(visitor).await,
@@ -689,10 +726,10 @@ impl<R: Read> de::Decoder for Decoder<R> {
                     dtype => return Err(de::Error::invalid_type(dtype, "a supported array type")),
                 }
             }
-            LIST_BEGIN => self.decode_seq(visitor).await,
-            MAP_BEGIN => self.decode_map(visitor).await,
-            STRING_DELIMIT => self.decode_string(visitor).await,
-            [dtype] => match type_from(*dtype)? {
+            b if b == LIST_BEGIN[0] => self.decode_seq(visitor).await,
+            b if b == MAP_BEGIN[0] => self.decode_map(visitor).await,
+            b if b == STRING_DELIMIT[0] => self.decode_string(visitor).await,
+            dtype => match type_from(dtype)? {
                 Type::None => self.decode_unit(visitor).await,
                 Type::Bool => self.decode_bool(visitor).await,
                 Type::F32 => self.decode_f32(visitor).await,
@@ -829,16 +866,16 @@ impl<R: Read> de::Decoder for Decoder<R> {
     }
 
     async fn decode_option<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
-        while self.buffer.is_empty() && !self.source.is_terminated() {
+        while self.remaining() == 0 && !self.source.is_terminated() {
             self.buffer().await?;
         }
 
-        if self.buffer.is_empty() {
+        if self.remaining() == 0 {
             return Err(Error::unexpected_end());
         }
 
-        if Some(self.buffer[0]) == Type::None.to_u8() {
-            self.buffer.remove(0);
+        if Some(self.available()[0]) == Type::None.to_u8() {
+            self.consume(1);
             visitor.visit_none()
         } else {
             visitor.visit_some(self).await
