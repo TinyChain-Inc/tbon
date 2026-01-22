@@ -8,7 +8,13 @@
 //! let actual = block_on(tbon::de::try_decode((), stream)).unwrap();
 //! assert_eq!(expected, actual);
 //! ```
+//!
+//! Compatibility notes:
+//!  - Decoding enforces a maximum nesting depth of 1024 by default; use
+//!    `tbon::de::decode_with_max_depth`/`tbon::de::try_decode_with_max_depth` to override.
 
+// `tbon` implements `destream`'s `async fn` trait APIs on stable Rust, so we keep this `allow`
+// until `async_fn_in_trait` is stabilized.
 #![allow(async_fn_in_trait)]
 
 use element::Element;
@@ -36,6 +42,9 @@ mod tests {
 
     use rand::Rng;
 
+    use super::constants::{
+        Type, ARRAY_DELIMIT, ESCAPE, LIST_BEGIN, LIST_END, MAP_BEGIN, MAP_END, STRING_DELIMIT, TRUE,
+    };
     use super::de::*;
     use super::en::*;
     use num_traits::Signed;
@@ -86,6 +95,50 @@ mod tests {
         assert!(result.is_err(), "expected decode to fail, but succeeded");
     }
 
+    async fn assert_decode_bytes_fails<T: FromStream<Context = ()>>(bytes: &[u8]) {
+        for chunk_size in 1..=bytes.len().min(16).max(1) {
+            let result: Result<T, _> = decode_from_chunks(bytes, chunk_size).await;
+            assert!(result.is_err(), "expected decode to fail, but succeeded");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_buffered_equivalent() {
+        let value = (true, -1i16, 3.14f64, "hello".to_string(), vec![1u8, 2, 3]);
+
+        let baseline = encode_to_vec(value.clone()).await;
+        let buffered_stream = super::en::encode_buffered(value, 1024).unwrap();
+        let buffered: Vec<u8> = buffered_stream
+            .try_fold(Vec::new(), |mut buffer, chunk| {
+                buffer.extend_from_slice(&chunk);
+                future::ready(Ok(buffer))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(baseline, buffered);
+    }
+
+    #[tokio::test]
+    async fn test_encode_large_seq_no_stack_overflow() {
+        let value: Vec<u64> = (0..100_000).map(|i| i as u64).collect();
+
+        let encoded = encode_to_vec(value.clone()).await;
+        assert!(!encoded.is_empty());
+        assert_eq!(encoded[0], LIST_BEGIN[0]);
+        assert_eq!(encoded[encoded.len() - 1], LIST_END[0]);
+    }
+
+    #[tokio::test]
+    async fn test_encode_large_map_no_stack_overflow() {
+        let value: BTreeMap<u64, u64> = (0..50_000_u64).map(|i| (i, i + 1)).collect();
+
+        let encoded = encode_to_vec(value).await;
+        assert!(!encoded.is_empty());
+        assert_eq!(encoded[0], MAP_BEGIN[0]);
+        assert_eq!(encoded[encoded.len() - 1], MAP_END[0]);
+    }
+
     #[tokio::test]
     async fn test_decode_chunk_boundaries() {
         let value = (true, -1i16, 3.14f64, "hello".to_string(), vec![1u8, 2, 3]);
@@ -96,6 +149,136 @@ mod tests {
                 decode_from_chunks(&bytes, chunk_size).await.unwrap();
             assert_eq!(decoded, value);
         }
+    }
+
+    #[tokio::test]
+    async fn test_decode_chunk_boundaries_with_escapes() {
+        // Ensure escapes spanning chunk boundaries are handled:
+        // - Strings escape `"` and `\\`
+        // - Byte arrays escape `=` (array delimiter) and `\\`
+        let value = (
+            "this is a \"string\" within a \\ string".to_string(),
+            Bytes::from(vec![b'=', b'\\', 1u8, 2u8, b'=', b'\\']),
+        );
+
+        let bytes = encode_to_vec(value.clone()).await;
+        for chunk_size in 1..=bytes.len().min(16).max(1) {
+            let decoded: (String, Bytes) = decode_from_chunks(&bytes, chunk_size).await.unwrap();
+            assert_eq!(decoded, value);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_truncated_escape_fails() {
+        // string: '"' '\' EOF
+        assert_decode_bytes_fails::<String>(&[STRING_DELIMIT[0], ESCAPE[0]]).await;
+
+        // bytes: '=' <dtype> '\' EOF
+        assert_decode_bytes_fails::<Vec<u8>>(&[ARRAY_DELIMIT[0], Type::U8 as u8, ESCAPE[0]]).await;
+    }
+
+    #[tokio::test]
+    async fn test_unterminated_string_fails() {
+        assert_decode_bytes_fails::<String>(&[STRING_DELIMIT[0], b'a', b'b']).await;
+    }
+
+    #[tokio::test]
+    async fn test_invalid_utf8_string_fails() {
+        assert_decode_bytes_fails::<String>(&[STRING_DELIMIT[0], 0xFF, STRING_DELIMIT[0]]).await;
+    }
+
+    #[tokio::test]
+    async fn test_malformed_arrays_fail() {
+        // unknown array dtype
+        struct Any;
+        struct AnyVisitor;
+
+        impl destream::de::Visitor for AnyVisitor {
+            type Value = Any;
+
+            fn expecting() -> &'static str {
+                "any TBON value"
+            }
+
+            fn visit_unit<E: destream::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Any)
+            }
+        }
+
+        impl FromStream for Any {
+            type Context = ();
+
+            async fn from_stream<D: destream::de::Decoder>(
+                _: (),
+                decoder: &mut D,
+            ) -> Result<Self, D::Error> {
+                decoder.decode_any(AnyVisitor).await
+            }
+        }
+
+        assert_decode_bytes_fails::<Any>(&[ARRAY_DELIMIT[0], 0xFF]).await;
+
+        // missing array end delimiter
+        assert_decode_bytes_fails::<Vec<u8>>(&[ARRAY_DELIMIT[0], Type::U8 as u8, 1, 2, 3]).await;
+    }
+
+    #[tokio::test]
+    async fn test_trailing_bytes_fail() {
+        let bytes = [Type::Bool as u8, TRUE[0], 0xFF, 0xFF];
+        let result: Result<bool, _> = decode_from_chunks(&bytes, 1).await;
+        assert!(result.is_err(), "expected trailing bytes to cause an error");
+    }
+
+    #[tokio::test]
+    async fn test_ignored_any_consumes_nested_values() {
+        // IgnoredAny must be able to consume nested values, including arrays (Bytes) and strings.
+        let value = (
+            HashMap::<String, Vec<u8>>::from_iter([(
+                "a".to_string(),
+                vec![1u8, 2, 3, b'=', b'\\'],
+            )]),
+            vec![
+                "hello".to_string(),
+                "this is a \"string\" within a \\ string".to_string(),
+            ],
+            Bytes::from(vec![b'=', b'\\', 0, 1, 2, b'=', b'\\']),
+            HashMap::<String, HashMap<String, Vec<u8>>>::from_iter([(
+                "nested".to_string(),
+                HashMap::from_iter([("k".to_string(), vec![9u8, 8, 7])]),
+            )]),
+        );
+
+        let encoded = encode(&value).unwrap();
+        let _: destream::IgnoredAny = try_decode((), encoded).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_decode_ignored_any_deep_nesting() {
+        // IgnoredAny must be able to consume deep nesting without recursion.
+        const DEPTH: usize = 2048;
+        let mut bytes = Vec::with_capacity(DEPTH * 2);
+        bytes.extend(std::iter::repeat(LIST_BEGIN[0]).take(DEPTH));
+        bytes.extend(std::iter::repeat(LIST_END[0]).take(DEPTH));
+
+        let source = stream::iter(bytes.iter().copied())
+            .chunks(1)
+            .map(Bytes::from)
+            .map(Result::<Bytes, super::en::Error>::Ok);
+
+        let _: destream::IgnoredAny = super::de::try_decode_with_max_depth((), source, DEPTH + 1)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_decode_reject_too_deep_nesting() {
+        const DEPTH: usize = 1025;
+        let mut bytes = Vec::with_capacity(DEPTH * 2);
+        bytes.extend(std::iter::repeat(LIST_BEGIN[0]).take(DEPTH));
+        bytes.extend(std::iter::repeat(LIST_END[0]).take(DEPTH));
+
+        let result: Result<destream::IgnoredAny, _> = decode_from_chunks(&bytes, 1).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

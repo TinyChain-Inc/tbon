@@ -102,21 +102,13 @@ impl<'en> en::EncodeMap<'en> for MapEncoder<'en> {
         Ok(())
     }
 
-    fn end(mut self) -> Result<Self::Ok, Self::Error> {
+    fn end(self) -> Result<Self::Ok, Self::Error> {
         if self.pending_key.is_some() {
             return Err(en::Error::custom(
                 "You must call encode_value after calling encode_key",
             ));
         }
-
-        let mut encoded = delimiter(MAP_BEGIN);
-
-        while let Some((key, value)) = self.entries.pop_front() {
-            encoded = Box::pin(encoded.chain(key).chain(value));
-        }
-
-        encoded = Box::pin(encoded.chain(delimiter(MAP_END)));
-        Ok(encoded)
+        Ok(stream::encode_map_encoded(self.entries))
     }
 }
 
@@ -142,15 +134,8 @@ impl<'en> SequenceEncoder<'en> {
         self.items.push_back(value);
     }
 
-    fn encode(mut self) -> Result<ByteStream<'en>, Error> {
-        let mut encoded = delimiter(LIST_BEGIN);
-
-        while let Some(item) = self.items.pop_front() {
-            encoded = Box::pin(encoded.chain(item));
-        }
-
-        encoded = Box::pin(encoded.chain(delimiter(LIST_END)));
-        Ok(encoded)
+    fn encode(self) -> Result<ByteStream<'en>, Error> {
+        Ok(stream::encode_list_encoded(self.items))
     }
 }
 
@@ -412,7 +397,7 @@ impl<'en> en::Encoder<'en> for Encoder {
     #[inline]
     fn encode_none(self) -> Result<Self::Ok, Self::Error> {
         Ok(Box::pin(futures::stream::once(future::ready(Ok(
-            Bytes::from(vec![(&Type::None).to_u8().expect("type bit")]),
+            Bytes::from(vec![Type::None.to_u8().expect("type bit")]),
         )))))
     }
 
@@ -428,7 +413,7 @@ impl<'en> en::Encoder<'en> for Encoder {
 
     #[inline]
     fn encode_uuid(self, uuid: Uuid) -> Result<Self::Ok, Self::Error> {
-        self.collect_bytes(uuid.as_bytes().into_iter().copied())
+        self.collect_bytes(uuid.as_bytes().iter().copied())
     }
 
     #[inline]
@@ -506,6 +491,20 @@ pub fn encode<'en, T: IntoStream<'en> + 'en>(
     value.into_stream(Encoder)
 }
 
+/// Given an encodable value, return an encoded stream buffered into chunks of `target` bytes.
+///
+/// This can reduce downstream overhead when the returned stream is consumed by an IO layer which
+/// performs one `await`/write per chunk.
+pub fn encode_buffered<'en, T: IntoStream<'en> + 'en>(
+    value: T,
+    target: usize,
+) -> Result<impl Stream<Item = Result<Bytes, Error>> + Send + Unpin + 'en, Error> {
+    Ok(stream::CoalesceStream::new(
+        value.into_stream(Encoder)?,
+        target,
+    ))
+}
+
 /// Given a stream of encodable key-value pairs, return an encoded map stream.
 pub fn encode_map<'en, K, V, S>(
     seq: S,
@@ -518,6 +517,20 @@ where
     stream::encode_map(seq)
 }
 
+/// Given a stream of encodable key-value pairs, return an encoded map stream buffered into chunks
+/// of `target` bytes.
+pub fn encode_map_buffered<'en, K, V, S>(
+    seq: S,
+    target: usize,
+) -> impl Stream<Item = Result<Bytes, Error>> + Send + Unpin + 'en
+where
+    K: IntoStream<'en> + 'en,
+    V: IntoStream<'en> + 'en,
+    S: Stream<Item = (K, V)> + Send + Unpin + 'en,
+{
+    stream::CoalesceStream::new(stream::encode_map(seq), target)
+}
+
 /// Given a stream of encodable elements, return an encoded sequence stream.
 pub fn encode_seq<'en, T, S>(
     seq: S,
@@ -527,6 +540,19 @@ where
     S: Stream<Item = T> + Send + Unpin + 'en,
 {
     stream::encode_list(seq)
+}
+
+/// Given a stream of encodable elements, return an encoded sequence stream buffered into chunks of
+/// `target` bytes.
+pub fn encode_seq_buffered<'en, T, S>(
+    seq: S,
+    target: usize,
+) -> impl Stream<Item = Result<Bytes, Error>> + Send + Unpin + 'en
+where
+    T: IntoStream<'en> + 'en,
+    S: Stream<Item = T> + Send + Unpin + 'en,
+{
+    stream::CoalesceStream::new(stream::encode_list(seq), target)
 }
 
 fn encode_array<'en, const SIZE: usize, E, T, S>(dtype: Type, chunks: S) -> ByteStream<'en>

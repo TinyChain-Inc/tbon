@@ -53,7 +53,10 @@ impl destream::de::Visitor for U64ArrayVisitor {
 impl FromStream for U64Array {
     type Context = ();
 
-    async fn from_stream<D: destream::de::Decoder>(_: (), decoder: &mut D) -> Result<Self, D::Error> {
+    async fn from_stream<D: destream::de::Decoder>(
+        _: (),
+        decoder: &mut D,
+    ) -> Result<Self, D::Error> {
         decoder.decode_array_u64(U64ArrayVisitor).await
     }
 }
