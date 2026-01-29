@@ -515,7 +515,7 @@ mod tests {
 
         let one = Bytes::from(vec![1, 2, 3]);
         let two = BTreeMap::new();
-        let tuple: (&Bytes, &BTreeMap<u64, String>) = (&one, &two);
+        let tuple: (Bytes, BTreeMap<u64, String>) = (one.clone(), two.clone());
 
         let encoded = encode(tuple).unwrap();
         let decoded: (Bytes, BTreeMap<u64, String>) = try_decode((), encoded).await.unwrap();
@@ -573,7 +573,9 @@ mod tests {
                 &'en self,
                 encoder: E,
             ) -> Result<E::Ok, E::Error> {
-                encoder.encode_array_i16(futures::stream::once(future::ready(self.data.to_vec())))
+                encoder.encode_array_i16(futures::stream::once(future::ready(
+                    self.data.iter().copied(),
+                )))
             }
         }
 
@@ -590,7 +592,7 @@ mod tests {
         let mut encoded = encode(&test).unwrap();
         let mut buf = Vec::new();
         while let Some(chunk) = encoded.try_next().await.unwrap() {
-            buf.extend(chunk.to_vec());
+            buf.extend_from_slice(&chunk);
         }
 
         let decoded: TestArray = try_decode((), encode(&test).unwrap()).await.unwrap();

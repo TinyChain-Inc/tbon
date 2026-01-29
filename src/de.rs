@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 use bytes::{BufMut, Bytes, BytesMut};
 use destream::{de, FromStream, Visitor};
 use futures::stream::{Fuse, FusedStream, Stream, StreamExt, TryStreamExt};
+use futures::FutureExt as _;
 use num_traits::{FromPrimitive, ToPrimitive};
 
 #[cfg(feature = "tokio-io")]
@@ -19,6 +20,7 @@ const SNIPPET_LEN: usize = 10;
 const DEFAULT_MAX_DEPTH: usize = 1024;
 
 /// Methods common to any decodable [`Stream`]
+#[trait_variant::make(Send)]
 pub trait Read: Send + Unpin {
     /// Read the next chunk of [`Bytes`] in the [`Stream`], if any.
     async fn next(&mut self) -> Option<Result<Bytes, Error>>;
@@ -817,7 +819,9 @@ impl<R: Read> Decoder<R> {
 
     async fn parse_string(&mut self) -> Result<String, Error> {
         let s = self.buffer_string(STRING_DELIMIT, STRING_DELIMIT).await?;
-        String::from_utf8(s.to_vec()).map_err(Error::invalid_utf8)
+        std::str::from_utf8(&s)
+            .map(str::to_owned)
+            .map_err(Error::invalid_utf8)
     }
 
     async fn parse_unit(&mut self) -> Result<(), Error> {
@@ -959,57 +963,57 @@ impl<R: Read> de::Decoder for Decoder<R> {
 
     async fn decode_array_bool<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_bool(access).await
+        visitor.visit_array_bool(access).boxed().await
     }
 
     async fn decode_array_i8<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_i8(access).await
+        visitor.visit_array_i8(access).boxed().await
     }
 
     async fn decode_array_i16<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_i16(access).await
+        visitor.visit_array_i16(access).boxed().await
     }
 
     async fn decode_array_i32<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_i32(access).await
+        visitor.visit_array_i32(access).boxed().await
     }
 
     async fn decode_array_i64<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_i64(access).await
+        visitor.visit_array_i64(access).boxed().await
     }
 
     async fn decode_array_u8<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_u8(access).await
+        visitor.visit_array_u8(access).boxed().await
     }
 
     async fn decode_array_u16<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_u16(access).await
+        visitor.visit_array_u16(access).boxed().await
     }
 
     async fn decode_array_u32<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_u32(access).await
+        visitor.visit_array_u32(access).boxed().await
     }
 
     async fn decode_array_u64<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_u64(access).await
+        visitor.visit_array_u64(access).boxed().await
     }
 
     async fn decode_array_f32<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_f32(access).await
+        visitor.visit_array_f32(access).boxed().await
     }
 
     async fn decode_array_f64<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = ArrayAccess::new(self).await?;
-        visitor.visit_array_f64(access).await
+        visitor.visit_array_f64(access).boxed().await
     }
 
     async fn decode_string<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -1030,18 +1034,18 @@ impl<R: Read> de::Decoder for Decoder<R> {
             self.consume(1);
             visitor.visit_none()
         } else {
-            visitor.visit_some(self).await
+            visitor.visit_some(self).boxed().await
         }
     }
 
     async fn decode_map<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = MapAccess::new(self, None).await?;
-        visitor.visit_map(access).await
+        visitor.visit_map(access).boxed().await
     }
 
     async fn decode_seq<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {
         let access = SeqAccess::new(self, None).await?;
-        visitor.visit_seq(access).await
+        visitor.visit_seq(access).boxed().await
     }
 
     async fn decode_tuple<V: Visitor>(
@@ -1050,7 +1054,7 @@ impl<R: Read> de::Decoder for Decoder<R> {
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
         let access = SeqAccess::new(self, Some(len)).await?;
-        visitor.visit_seq(access).await
+        visitor.visit_seq(access).boxed().await
     }
 
     async fn decode_unit<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Self::Error> {

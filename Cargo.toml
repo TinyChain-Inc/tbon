@@ -1,10 +1,10 @@
 [package]
 name = "tbon"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["code@tinychain.net"]
 edition = "2021"
 description = "TinyChain Binary Object Notation is a compact and versatile stream-friendly binary serialization format"
-repository = "https://github.com/haydnv/tbon"
+repository = "https://github.com/TinyChain-Inc/tbon"
 readme = "README.md"
 license = "Apache-2.0"
 
@@ -18,11 +18,12 @@ all = ["tokio-io"]
 
 [dependencies]
 bytes = "1.10"
-destream = { path = "../destream", version = "0.9.0" }
+destream = { path = "../destream", version = "0.10.0" }
 futures = "0.3"
 num-traits = "0.2"
 num-derive = "0.4"
 pin-project = "1.1"
+trait-variant = "0.1.2"
 tokio = { version = "1.43", features = ["io-util"], optional = true }
 uuid = "1.13"
 
