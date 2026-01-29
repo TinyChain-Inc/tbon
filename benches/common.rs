@@ -7,7 +7,7 @@ use futures::stream;
 use futures::TryStreamExt;
 
 // Used across multiple benchmark entrypoints depending on enabled features.
-#[allow(dead_code)]
+#[allow(dead_code)] // used across multiple bench entrypoints depending on enabled features
 pub fn chunk_stream(bytes: Bytes, chunk_size: usize) -> impl futures::Stream<Item = Bytes> + Unpin {
     assert!(chunk_size > 0);
 
@@ -69,7 +69,7 @@ impl<'en> destream::en::ToStream<'en> for U64Array {
 }
 
 // Used across multiple benchmark entrypoints depending on enabled features.
-#[allow(dead_code)]
+#[allow(dead_code)] // used across multiple bench entrypoints depending on enabled features
 pub async fn encode_payload(value: &U64Array) -> Bytes {
     let stream = tbon::en::encode(value).expect("encode tbon payload");
     let encoded: Vec<u8> = stream

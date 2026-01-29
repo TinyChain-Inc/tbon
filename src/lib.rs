@@ -27,6 +27,8 @@ pub mod en;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::approx_constant)] // tests use explicit literals to validate encoding/decoding
+
     use std::collections::{
         BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque,
     };
@@ -96,7 +98,7 @@ mod tests {
     }
 
     async fn assert_decode_bytes_fails<T: FromStream<Context = ()>>(bytes: &[u8]) {
-        for chunk_size in 1..=bytes.len().min(16).max(1) {
+        for chunk_size in 1..=bytes.len().clamp(1, 16) {
             let result: Result<T, _> = decode_from_chunks(bytes, chunk_size).await;
             assert!(result.is_err(), "expected decode to fail, but succeeded");
         }
@@ -144,7 +146,7 @@ mod tests {
         let value = (true, -1i16, 3.14f64, "hello".to_string(), vec![1u8, 2, 3]);
 
         let bytes = encode_to_vec(value.clone()).await;
-        for chunk_size in 1..=bytes.len().min(16).max(1) {
+        for chunk_size in 1..=bytes.len().clamp(1, 16) {
             let decoded: (bool, i16, f64, String, Vec<u8>) =
                 decode_from_chunks(&bytes, chunk_size).await.unwrap();
             assert_eq!(decoded, value);
@@ -162,7 +164,7 @@ mod tests {
         );
 
         let bytes = encode_to_vec(value.clone()).await;
-        for chunk_size in 1..=bytes.len().min(16).max(1) {
+        for chunk_size in 1..=bytes.len().clamp(1, 16) {
             let decoded: (String, Bytes) = decode_from_chunks(&bytes, chunk_size).await.unwrap();
             assert_eq!(decoded, value);
         }
@@ -257,8 +259,8 @@ mod tests {
         // IgnoredAny must be able to consume deep nesting without recursion.
         const DEPTH: usize = 2048;
         let mut bytes = Vec::with_capacity(DEPTH * 2);
-        bytes.extend(std::iter::repeat(LIST_BEGIN[0]).take(DEPTH));
-        bytes.extend(std::iter::repeat(LIST_END[0]).take(DEPTH));
+        bytes.extend(std::iter::repeat_n(LIST_BEGIN[0], DEPTH));
+        bytes.extend(std::iter::repeat_n(LIST_END[0], DEPTH));
 
         let source = stream::iter(bytes.iter().copied())
             .chunks(1)
@@ -274,8 +276,8 @@ mod tests {
     async fn test_decode_reject_too_deep_nesting() {
         const DEPTH: usize = 1025;
         let mut bytes = Vec::with_capacity(DEPTH * 2);
-        bytes.extend(std::iter::repeat(LIST_BEGIN[0]).take(DEPTH));
-        bytes.extend(std::iter::repeat(LIST_END[0]).take(DEPTH));
+        bytes.extend(std::iter::repeat_n(LIST_BEGIN[0], DEPTH));
+        bytes.extend(std::iter::repeat_n(LIST_END[0], DEPTH));
 
         let result: Result<destream::IgnoredAny, _> = decode_from_chunks(&bytes, 1).await;
         assert!(result.is_err());
@@ -606,6 +608,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_uuid() {
-        run_test(Uuid::from_bytes([0u8; 16].into())).await;
+        run_test(Uuid::from_bytes([0u8; 16])).await;
     }
 }
