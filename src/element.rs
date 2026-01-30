@@ -37,11 +37,7 @@ impl Element for bool {
 
     #[inline]
     fn from_bytes(bytes: &[u8]) -> Self {
-        if bytes[0] == 1 {
-            true
-        } else {
-            false
-        }
+        bytes[0] == 1
     }
 }
 
