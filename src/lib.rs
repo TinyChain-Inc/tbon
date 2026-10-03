@@ -193,6 +193,7 @@ mod tests {
     async fn test_malformed_arrays_fail() {
         // unknown array dtype
         struct Any;
+
         struct AnyVisitor;
 
         impl destream::de::Visitor for AnyVisitor {

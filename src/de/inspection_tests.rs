@@ -168,6 +168,7 @@ async fn inspection_obeys_default_and_configured_depth_and_callback_errors() {
 }
 
 struct Released(Arc<AtomicBool>);
+
 impl Drop for Released {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
@@ -194,10 +195,12 @@ async fn cancellation_and_unpolled_drop_release_inspection_callback() {
 }
 
 struct OneChunk(Option<Bytes>);
+
 impl Read for OneChunk {
     async fn next(&mut self) -> Option<Result<Bytes, Error>> {
         self.0.take().map(Ok)
     }
+
     fn is_terminated(&self) -> bool {
         self.0.is_none()
     }

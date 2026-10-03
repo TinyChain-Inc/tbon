@@ -805,6 +805,7 @@ impl<R: Read> Decoder<R> {
 
 impl<R: Read> de::Decoder for Decoder<R> {
     type Error = Error;
+
     async fn peek_kind(&mut self) -> Result<de::Kind, Self::Error> {
         self.fill().await?;
         let byte = self.available()[0];

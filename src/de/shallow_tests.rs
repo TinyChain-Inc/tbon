@@ -14,6 +14,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use super::*;
 
 struct Events<S>(S);
+
 impl<'en, T, S> IntoStream<'en> for Events<S>
 where
     T: IntoStream<'en> + 'en,
@@ -90,6 +91,7 @@ async fn shallow_consumption_preserves_depth_limits_and_borrowed_inputs() {
 }
 
 struct Lease(Arc<AtomicBool>);
+
 impl Drop for Lease {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);

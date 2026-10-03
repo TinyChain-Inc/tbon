@@ -25,6 +25,7 @@ impl<'en, S> Events<'en, S> {
         self.current = None;
         self.source = None;
         self.frames = Vec::new();
+
         Poll::Ready(Some(Err(cause)))
     }
 
@@ -34,6 +35,7 @@ impl<'en, S> Events<'en, S> {
             if frame.map {
                 frame.value = !frame.value;
             }
+
             Ok(())
         } else if self.root {
             Err(super::Error::custom("multiple root values in event stream"))
@@ -48,9 +50,11 @@ impl<'en, S> Events<'en, S> {
             .frames
             .pop()
             .ok_or_else(|| super::Error::custom("unexpected container end"))?;
+
         if frame.map && frame.value {
             return Err(super::Error::custom("map key is missing its value"));
         }
+
         Ok(frame.map)
     }
 
@@ -72,6 +76,7 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
         loop {
             if let Some(current) = &mut this.current {
                 match ready!(current.as_mut().poll_next(cx)) {
@@ -80,6 +85,7 @@ where
                     None => this.current = None,
                 }
             }
+
             let Some(source) = &mut this.source else {
                 return Poll::Ready(None);
             };
@@ -94,12 +100,14 @@ where
                     };
                 }
             };
+
             match event {
                 Event::End => {
                     let map = match this.end() {
                         Ok(map) => map,
                         Err(cause) => return this.fail(cause),
                     };
+
                     let end = if map { MAP_END } else { LIST_END };
                     return Poll::Ready(Some(Ok(Bytes::from_static(end))));
                 }
@@ -108,6 +116,7 @@ where
                     if let Err(cause) = this.begin_value() {
                         return this.fail(cause);
                     }
+
                     this.frames.push(Frame { map, value: false });
                     let begin = if map { MAP_BEGIN } else { LIST_BEGIN };
                     return Poll::Ready(Some(Ok(Bytes::from_static(begin))));
@@ -117,6 +126,7 @@ where
                         Ok(current) => current,
                         Err(cause) => return this.fail(cause),
                     };
+
                     if let Err(cause) = this.begin_value() {
                         return this.fail(cause);
                     }
