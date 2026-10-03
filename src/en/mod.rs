@@ -15,6 +15,7 @@ use uuid::Uuid;
 use super::constants::*;
 use super::element::{Element, IntoBytes};
 
+mod events;
 mod stream;
 
 /// A [`Stream`] of [`Bytes`] chunks
@@ -229,6 +230,14 @@ impl<'en> en::Encoder<'en> for Encoder {
     type EncodeMap = MapEncoder<'en>;
     type EncodeSeq = SequenceEncoder<'en>;
     type EncodeTuple = SequenceEncoder<'en>;
+
+    fn encode_events<T, S>(self, events: S) -> Result<Self::Ok, Self::Error>
+    where
+        T: en::IntoStream<'en> + 'en,
+        S: Stream<Item = Result<en::Event<T>, Self::Error>> + Send + 'en,
+    {
+        Ok(events::encode(events))
+    }
 
     #[inline]
     fn encode_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
