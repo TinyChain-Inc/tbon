@@ -8,7 +8,6 @@ use destream::{de, FromStream, Visitor};
 use futures::stream::{Fuse, FusedStream, Stream, StreamExt, TryStreamExt};
 use futures::FutureExt as _;
 use num_traits::{FromPrimitive, ToPrimitive};
-
 #[cfg(feature = "tokio-io")]
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 
@@ -192,6 +191,10 @@ impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a,
                 break;
             }
 
+            if i >= self.decoder.remaining() {
+                return Err(Error::unexpected_end());
+            }
+
             if escaped {
                 escaped = false;
             } else if self.decoder.available()[i] == ESCAPE[0] {
@@ -216,6 +219,7 @@ impl<'a, S: Read + 'a, T: Element + Send> de::ArrayAccess<T> for ArrayAccess<'a,
                 escaped.put_u8(*byte);
             }
         }
+
         self.decoder.consume(i);
 
         let mut elements = 0;
@@ -261,6 +265,7 @@ impl<'a, S: Read + 'a> de::MapAccess for MapAccess<'a, S> {
         if self.container.slot() == de::Slot::End {
             return Ok(None);
         }
+
         let key = K::from_stream(context, self.decoder).await?;
         de::Decoder::finish_child(self.decoder, &mut self.container).await?;
         Ok(Some(key))
@@ -270,6 +275,7 @@ impl<'a, S: Read + 'a> de::MapAccess for MapAccess<'a, S> {
         if self.container.slot() != de::Slot::Value {
             return Err(de::Error::custom("expected a map value after its key"));
         }
+
         let value = V::from_stream(context, self.decoder).await?;
         de::Decoder::finish_child(self.decoder, &mut self.container).await?;
         Ok(value)
@@ -302,6 +308,7 @@ impl<'a, S: Read + 'a> de::SeqAccess for SeqAccess<'a, S> {
         if self.container.slot() == de::Slot::End {
             return Ok(None);
         }
+
         let value = T::from_stream(context, self.decoder).await?;
         de::Decoder::finish_child(self.decoder, &mut self.container).await?;
         Ok(Some(value))
@@ -457,6 +464,7 @@ impl<R: Read> Decoder<R> {
                 self.pending = data?;
             }
         }
+
         self.maybe_compact();
         let len = self.pending.len().min(CHUNK_SIZE);
         self.buffer.extend_from_slice(&self.pending.split_to(len));
@@ -578,6 +586,7 @@ impl<R: Read> Decoder<R> {
                 output[len] = byte;
                 len += 1;
             }
+
             self.consume(consumed);
             if len == output.len() || done {
                 let valid = match std::str::from_utf8(&output[..len]) {
@@ -585,12 +594,14 @@ impl<R: Read> Decoder<R> {
                     Err(error) if !done && error.error_len().is_none() => error.valid_up_to(),
                     Err(error) => return Err(Error::invalid_utf8(error)),
                 };
+
                 if valid != 0 {
                     inspect(de::Inspection::TextChunk(&output[..valid]))?;
                     output.copy_within(valid..len, 0);
                     len -= valid;
                 }
             }
+
             if done {
                 return inspect(de::Inspection::TextEnd { capacity_bound });
             }
@@ -601,6 +612,7 @@ impl<R: Read> Decoder<R> {
         while self.remaining() == 0 && !self.source_terminated() {
             self.buffer().await?;
         }
+
         if self.remaining() == 0 {
             Err(Error::unexpected_end())
         } else {
@@ -623,6 +635,7 @@ impl<R: Read> Decoder<R> {
             Type::F32 | Type::I32 | Type::U32 => 4,
             Type::F64 | Type::I64 | Type::U64 => 8,
         };
+
         self.consume(1);
         let mut bytes = 0usize;
         let mut escaped = false;
@@ -642,15 +655,20 @@ impl<R: Read> Decoder<R> {
                     escaped = true;
                     continue;
                 }
+                if matches!(dtype, Type::Bool) && byte > 1 {
+                    return Err(de::Error::custom("invalid boolean representation"));
+                }
                 bytes = bytes
                     .checked_add(1)
                     .ok_or_else(|| de::Error::custom("array size overflow"))?;
             }
+
             self.consume(consumed);
             if done {
                 if !bytes.is_multiple_of(element_size) {
                     return Err(de::Error::custom("incomplete array element"));
                 }
+
                 return inspect(de::Inspection::TypedArray {
                     len: bytes / element_size,
                     element_size,
@@ -826,6 +844,7 @@ impl<R: Read> de::Decoder for Decoder<R> {
             de::Kind::Map => (MAP_BEGIN, MAP_END),
             de::Kind::Leaf => return Err(de::Error::custom("a leaf is not a container")),
         };
+
         self.expect_delimiter(begin).await?;
         self.push_depth()?;
         let empty = self.maybe_delimiter(end).await?;
@@ -839,9 +858,11 @@ impl<R: Read> de::Decoder for Decoder<R> {
         if container.slot() == de::Slot::End {
             return Err(de::Error::custom("container has already ended"));
         }
+
         if container.slot() == de::Slot::Key {
             return container.advance(false);
         }
+
         let end = if container.kind() == de::Kind::Map {
             MAP_END
         } else {
@@ -852,6 +873,7 @@ impl<R: Read> de::Decoder for Decoder<R> {
         if ended {
             self.pop_depth();
         }
+
         Ok(())
     }
 
@@ -885,10 +907,15 @@ impl<R: Read> de::Decoder for Decoder<R> {
                     self.buffer().await?;
                 }
 
+                if self.remaining() < 2 {
+                    return Err(Error::unexpected_end());
+                }
+
                 match type_from(self.available()[1])? {
                     Type::Bool => self.decode_array_bool(visitor).await,
                     Type::F32 => self.decode_array_f32(visitor).await,
                     Type::F64 => self.decode_array_f64(visitor).await,
+                    Type::I8 => self.decode_array_i8(visitor).await,
                     Type::I16 => self.decode_array_i16(visitor).await,
                     Type::I32 => self.decode_array_i32(visitor).await,
                     Type::I64 => self.decode_array_i64(visitor).await,

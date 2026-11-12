@@ -9,6 +9,11 @@ pub trait Element: Sized {
 
     fn dtype() -> Type;
 
+    /// Decode an element whose byte width has already been validated.
+    ///
+    /// Native callers must supply exactly [`Self::SIZE`] bytes with a valid
+    /// representation (in particular, a boolean byte is zero or one). Use
+    /// [`Self::parse`] for bytes whose length or representation is not checked.
     fn from_bytes(bytes: &[u8]) -> Self;
 
     // TODO: use const generic Self::SIZE to return an array
@@ -38,6 +43,15 @@ impl Element for bool {
     #[inline]
     fn from_bytes(bytes: &[u8]) -> Self {
         bytes[0] == 1
+    }
+
+    fn parse<E: de::Error>(bytes: &[u8]) -> Result<Self, E> {
+        match bytes {
+            [0] => Ok(false),
+            [1] => Ok(true),
+            [_] => Err(de::Error::custom("invalid boolean representation")),
+            _ => Err(de::Error::invalid_length(bytes.len(), Self::SIZE)),
+        }
     }
 }
 

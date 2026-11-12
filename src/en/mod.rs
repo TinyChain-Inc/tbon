@@ -1,8 +1,8 @@
 //! Encode a Rust data structure into a TBON stream.
+//! Container streams consume children lazily and retain movable child handles inline.
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::mem;
 use std::pin::Pin;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -96,9 +96,7 @@ impl<'en> en::EncodeMap<'en> for MapEncoder<'en> {
 
         let value = value.into_stream(Encoder)?;
 
-        let mut key = None;
-        mem::swap(&mut self.pending_key, &mut key);
-
+        let key = self.pending_key.take();
         self.entries.push_back((key.expect("key"), value));
         Ok(())
     }
@@ -109,6 +107,7 @@ impl<'en> en::EncodeMap<'en> for MapEncoder<'en> {
                 "You must call encode_value after calling encode_key",
             ));
         }
+
         Ok(stream::encode_map_encoded(self.entries))
     }
 }
@@ -129,15 +128,6 @@ impl<'en> SequenceEncoder<'en> {
 
         Self { items }
     }
-
-    #[inline]
-    fn push(&mut self, value: ByteStream<'en>) {
-        self.items.push_back(value);
-    }
-
-    fn encode(self) -> Result<ByteStream<'en>, Error> {
-        Ok(stream::encode_list_encoded(self.items))
-    }
 }
 
 impl<'en> en::EncodeSeq<'en> for SequenceEncoder<'en> {
@@ -150,12 +140,12 @@ impl<'en> en::EncodeSeq<'en> for SequenceEncoder<'en> {
         value: T,
     ) -> Result<(), Self::Error> {
         let encoded = value.into_stream(Encoder)?;
-        self.push(encoded);
+        self.items.push_back(encoded);
         Ok(())
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        self.encode()
+        Ok(stream::encode_list_encoded(self.items))
     }
 }
 
@@ -169,12 +159,12 @@ impl<'en> en::EncodeTuple<'en> for SequenceEncoder<'en> {
         value: T,
     ) -> Result<(), Self::Error> {
         let encoded = value.into_stream(Encoder)?;
-        self.push(encoded);
+        self.items.push_back(encoded);
         Ok(())
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        self.encode()
+        Ok(stream::encode_list_encoded(self.items))
     }
 }
 

@@ -41,16 +41,15 @@ mod tests {
     use bytes::Bytes;
     use destream::{FromStream, IntoStream};
     use futures::{future, stream, StreamExt, TryStreamExt};
-
+    use num_traits::Signed;
     use rand::Rng;
+    use uuid::Uuid;
 
     use super::constants::{
         Type, ARRAY_DELIMIT, ESCAPE, LIST_BEGIN, LIST_END, MAP_BEGIN, MAP_END, STRING_DELIMIT, TRUE,
     };
     use super::de::*;
     use super::en::*;
-    use num_traits::Signed;
-    use uuid::Uuid;
 
     async fn run_test<'en, T>(value: T)
     where
@@ -612,3 +611,7 @@ mod tests {
         run_test(Uuid::from_bytes([0u8; 16])).await;
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/malformed.rs"]
+mod malformed;
