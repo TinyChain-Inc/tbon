@@ -63,3 +63,6 @@ String scalars are escaped eagerly into one output buffer. `collect_str` writes
 formatted fragments directly into that buffer and returns formatting failures
 before producing a stream. Borrowed and owned string inputs use the same wire
 representation. Container children remain pull-driven.
+
+Completed scalar output is retained inline; asynchronous container streams remain
+boxed. `ByteStream` uses the standard `Either` stream representation.

@@ -19,7 +19,10 @@ mod events;
 mod stream;
 
 /// A [`Stream`] of [`Bytes`] chunks
-pub type ByteStream<'en> = Pin<Box<dyn Stream<Item = Result<Bytes, Error>> + Send + Unpin + 'en>>;
+pub type ByteStream<'en> = futures::future::Either<
+    futures::stream::Iter<std::option::IntoIter<Result<Bytes, Error>>>,
+    Pin<Box<dyn Stream<Item = Result<Bytes, Error>> + Send + Unpin + 'en>>,
+>;
 
 /// An encoding error
 pub struct Error {
@@ -178,9 +181,7 @@ impl Encoder {
         chunk.put_u8(dtype.to_u8().expect("type bit"));
         chunk.extend_from_slice(value);
 
-        Ok(Box::pin(futures::stream::once(future::ready(Ok(
-            chunk.into()
-        )))))
+        Ok(ready_chunk(chunk.into()))
     }
 }
 
@@ -385,9 +386,7 @@ impl<'en> en::Encoder<'en> for Encoder {
         write_escaped(&mut chunk, value);
         chunk.put_u8(STRING_DELIMIT[0]);
 
-        Ok(Box::pin(futures::stream::once(future::ready(Ok(
-            chunk.freeze()
-        )))))
+        Ok(ready_chunk(chunk.freeze()))
     }
 
     fn collect_str<T: fmt::Display + ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error> {
@@ -398,16 +397,14 @@ impl<'en> en::Encoder<'en> for Encoder {
 
         chunk.put_u8(STRING_DELIMIT[0]);
 
-        Ok(Box::pin(futures::stream::once(future::ready(Ok(
-            chunk.freeze()
-        )))))
+        Ok(ready_chunk(chunk.freeze()))
     }
 
     #[inline]
     fn encode_none(self) -> Result<Self::Ok, Self::Error> {
-        Ok(Box::pin(futures::stream::once(future::ready(Ok(
-            Bytes::from(vec![Type::None.to_u8().expect("type bit")]),
-        )))))
+        Ok(ready_chunk(Bytes::from(vec![Type::None
+            .to_u8()
+            .expect("type bit")])))
     }
 
     #[inline]
@@ -437,7 +434,9 @@ impl<'en> en::Encoder<'en> for Encoder {
         V: en::IntoStream<'en> + 'en,
         S: Stream<Item = (K, V)> + Send + Unpin + 'en,
     {
-        Ok(Box::pin(stream::encode_map(map)))
+        Ok(futures::future::Either::Right(Box::pin(
+            stream::encode_map(map),
+        )))
     }
 
     #[inline]
@@ -450,7 +449,9 @@ impl<'en> en::Encoder<'en> for Encoder {
         self,
         seq: S,
     ) -> Result<Self::Ok, Self::Error> {
-        Ok(Box::pin(stream::encode_list(seq)))
+        Ok(futures::future::Either::Right(Box::pin(
+            stream::encode_list(seq),
+        )))
     }
 
     #[inline]
@@ -481,16 +482,14 @@ impl<'en> en::Encoder<'en> for Encoder {
 
         array.extend_from_slice(ARRAY_DELIMIT);
 
-        let array: ByteStream = Box::pin(futures::stream::once(future::ready(Ok(array.into()))));
+        let array: ByteStream = ready_chunk(array.into());
         Ok(array)
     }
 }
 
 #[inline]
 fn delimiter<'en>(delimiter: &'static [u8]) -> ByteStream<'en> {
-    Box::pin(futures::stream::once(future::ready(Ok(
-        Bytes::from_static(delimiter),
-    ))))
+    ready_chunk(Bytes::from_static(delimiter))
 }
 
 /// Given an encodable value, return an encoded stream.
@@ -594,6 +593,11 @@ where
         Ok(encoded.into())
     });
 
-    let encoded: ByteStream = Box::pin(start.chain(contents).chain(end));
+    let encoded: ByteStream =
+        futures::future::Either::Right(Box::pin(start.chain(contents).chain(end)));
     encoded
+}
+
+fn ready_chunk<'en>(chunk: Bytes) -> ByteStream<'en> {
+    futures::future::Either::Left(futures::stream::iter(Some(Ok(chunk))))
 }
