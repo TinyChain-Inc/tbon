@@ -182,35 +182,24 @@ impl Encoder {
             chunk.into()
         )))))
     }
+}
 
-    #[inline]
-    fn encode_string_type<'en>(
-        &self,
-        start: u8,
-        value: &[u8],
-        end: u8,
-    ) -> Result<ByteStream<'en>, Error> {
-        let mut chunk = BytesMut::with_capacity(value.len() + 2);
-        chunk.put_u8(start);
-        chunk.extend(self.escape(value, &[start, end]));
-        chunk.put_u8(end);
-
-        Ok(Box::pin(futures::stream::once(future::ready(Ok(
-            chunk.into()
-        )))))
-    }
-
-    fn escape(&self, value: &[u8], control: &[u8]) -> Vec<u8> {
-        let mut escaped = Vec::with_capacity(value.len() * 2);
-        for char in value {
-            if control.contains(char) || char == &ESCAPE[0] {
-                escaped.push(ESCAPE[0])
-            }
-
-            escaped.push(*char);
+fn write_escaped(output: &mut BytesMut, value: &str) {
+    for &byte in value.as_bytes() {
+        if byte == STRING_DELIMIT[0] || byte == ESCAPE[0] {
+            output.put_u8(ESCAPE[0]);
         }
 
-        escaped
+        output.put_u8(byte);
+    }
+}
+
+struct Escaped<'a>(&'a mut BytesMut);
+
+impl fmt::Write for Escaped<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        write_escaped(self.0, value);
+        Ok(())
     }
 }
 
@@ -389,8 +378,29 @@ impl<'en> en::Encoder<'en> for Encoder {
     }
 
     #[inline]
-    fn encode_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
-        self.encode_string_type(STRING_DELIMIT[0], v.as_bytes(), STRING_DELIMIT[0])
+    fn encode_str<S: AsRef<str> + Send + 'en>(self, v: S) -> Result<Self::Ok, Self::Error> {
+        let value = v.as_ref();
+        let mut chunk = BytesMut::with_capacity(value.len() + 2);
+        chunk.put_u8(STRING_DELIMIT[0]);
+        write_escaped(&mut chunk, value);
+        chunk.put_u8(STRING_DELIMIT[0]);
+
+        Ok(Box::pin(futures::stream::once(future::ready(Ok(
+            chunk.freeze()
+        )))))
+    }
+
+    fn collect_str<T: fmt::Display + ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error> {
+        let mut chunk = BytesMut::new();
+        chunk.put_u8(STRING_DELIMIT[0]);
+        fmt::write(&mut Escaped(&mut chunk), format_args!("{value}"))
+            .map_err(|_| en::Error::custom("failed to format string"))?;
+
+        chunk.put_u8(STRING_DELIMIT[0]);
+
+        Ok(Box::pin(futures::stream::once(future::ready(Ok(
+            chunk.freeze()
+        )))))
     }
 
     #[inline]

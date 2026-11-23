@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -249,4 +251,86 @@ fn ordinary_child_errors_and_cancellation_release_ownership() {
         drop(source);
         assert!(observer.upgrade().is_none());
     });
+}
+
+const CASES: &[(&str, &[u8])] = &[
+    ("", b"\"\""),
+    ("ASCII/", b"\"ASCII/\""),
+    ("\"\\", b"\"\\\"\\\\\""),
+    ("\0\n\t\r\u{1f}", b"\"\0\n\t\r\x1f\""),
+    ("λ雪", "\"λ雪\"".as_bytes()),
+];
+
+const FRAGMENTED: &[u8] = "\"a\\\"\\\\\nλ\"".as_bytes();
+
+struct OwnedText(String);
+
+impl AsRef<str> for OwnedText {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+struct FormattedText<'a> {
+    parts: &'a [&'a str],
+    fail: bool,
+}
+
+impl fmt::Display for FormattedText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for part in self.parts {
+            f.write_str(part)?;
+        }
+
+        if self.fail {
+            Err(fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn string_inputs_and_formatted_values_preserve_wire_bytes() {
+    block_on(async {
+        async fn check<'en>(text: impl AsRef<str> + Send + 'en, expected: &[u8]) {
+            assert_eq!(
+                encoded(crate::en::Encoder.encode_str(text).unwrap()).await,
+                expected
+            );
+        }
+
+        for &(text, expected) in CASES {
+            let borrowed = text.to_owned();
+            check(borrowed.as_str(), expected).await;
+            check(text.to_owned(), expected).await;
+            check(Arc::<str>::from(text), expected).await;
+            check(Box::<str>::from(text), expected).await;
+            check(Cow::Borrowed(text), expected).await;
+            check(Cow::<str>::Owned(text.to_owned()), expected).await;
+            check(OwnedText(text.to_owned()), expected).await;
+            assert_eq!(
+                encoded(crate::en::Encoder.collect_str(text).unwrap()).await,
+                expected
+            );
+        }
+
+        let stream = {
+            let formatted = FormattedText {
+                parts: &["a\"", "\\", "\n", "λ"],
+                fail: false,
+            };
+
+            crate::en::Encoder.collect_str(&formatted).unwrap()
+        };
+
+        assert_eq!(encoded(stream).await, FRAGMENTED);
+    });
+
+    let failed = FormattedText {
+        parts: &["partial\"\\"],
+        fail: true,
+    };
+
+    assert!(crate::en::Encoder.collect_str(&failed).is_err());
 }
