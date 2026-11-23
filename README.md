@@ -58,3 +58,8 @@ For input-dependent nesting, follow `destream`'s
 [iterative traversal guidance](https://docs.rs/destream/latest/destream/).
 Container cursors and inspection share framing operations and the configured
 nesting limit.
+
+String scalars are escaped eagerly into one output buffer. `collect_str` writes
+formatted fragments directly into that buffer and returns formatting failures
+before producing a stream. Borrowed and owned string inputs use the same wire
+representation. Container children remain pull-driven.
